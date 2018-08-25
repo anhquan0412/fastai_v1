@@ -32,6 +32,10 @@ def pil2tensor(image):
     arr = arr.permute(2,0,1)
     return arr.float().div_(255)
 
+def open_image(fn):
+    x = PIL.Image.open(fn).convert('RGB')
+    return pil2tensor(x)
+
 class FilesDataset(Dataset):
     def __init__(self, folder, classes=None):
         self.fns, self.y = [], []
@@ -41,12 +45,9 @@ class FilesDataset(Dataset):
             fnames = get_image_files(folder/cls)
             self.fns += fnames
             self.y += [i] * len(fnames)
-        
-    def __len__(self): return len(self.fns)
 
-    def __getitem__(self,i):
-        x = PIL.Image.open(self.fns[i]).convert('RGB')
-        return pil2tensor(x),self.y[i]
+    def __len__(self): return len(self.fns)
+    def __getitem__(self,i): return open_image(self.fns[i]),self.y[i]
 
 def image2np(image): return image.cpu().permute(1,2,0).numpy()
 
@@ -67,13 +68,17 @@ def show_images(x,y,rows, classes, figsize=(9,9)):
         ax.set_title(classes[y[i]])
     plt.tight_layout()
 
-def logit(x): return (x/(1-x)).log()
-def logit_(x): return (x.div_(1-x)).log_()
+def logit(x):  return -(1/x-1).log()
+def logit_(x): return (x.reciprocal_().sub_(1)).log_().neg_()
 
 def brightness(x, change): return x.add_(scipy.special.logit(change))
 def contrast(x, scale): return x.mul_(scale)
 
-def apply_lighting(func): return lambda x: func(logit_(x)).sigmoid()
+def _apply_lighting(x, func):
+    if func is None: return x
+    return func(logit_(x)).sigmoid()
+
+def apply_lighting(func): return partial(_apply_lighting, func=func)
 
 def listify(p=None, q=None):
     if p is None: p=[]
@@ -86,7 +91,7 @@ def compose(funcs):
     def _inner(x, *args, **kwargs):
         for f in funcs: x = f(x, *args, **kwargs)
         return x
-    return _inner
+    return _inner if funcs else None
 
 def uniform(low, high, size=None):
     return random.uniform(low,high) if size is None else torch.FloatTensor(size).uniform_(low,high)
@@ -99,10 +104,10 @@ def rand_bool(p, size=None): return uniform(0,1,size)<p
 
 TfmType = IntEnum('TfmType', 'Start Affine Coord Pixel Lighting')
 
-def brightness(x, change: uniform) -> TfmType.Lighting:
+def brightness(x, change:uniform) -> TfmType.Lighting:
     return x.add_(scipy.special.logit(change))
 
-def contrast(x, scale: log_uniform) -> TfmType.Lighting:
+def contrast(x, scale:log_uniform) -> TfmType.Lighting:
     return x.mul_(scale)
 
 import inspect
@@ -113,7 +118,6 @@ def get_default_args(func):
             if v.default is not inspect.Parameter.empty}
 
 def resolve_args(func, **kwargs):
-    kwargs.pop('p', None)
     def_args = get_default_args(func)
     for k,v in func.__annotations__.items():
         if k == 'return': continue
@@ -127,17 +131,19 @@ def resolve_args(func, **kwargs):
 def noop(x=None, *args, **kwargs): return x
 
 class Transform():
-    def __init__(self, func, **kwargs):
-        self.func,self.kw = func,kwargs
+    def __init__(self, func, p=1., **kwargs):
+        self.func,self.p,self.kw = func,p,kwargs
         self.tfm_type = self.func.__annotations__['return']
-        
+
     def __repr__(self):
-        return f'{self.func.__name__}_tfm->{self.tfm_type.name}; {self.kw}'
-    
-    def __call__(self):
-        if 'p' in self.kw and not rand_bool(self.kw['p']): return noop
-        kwargs = resolve_args(self.func, **self.kw)
-        return partial(self.func, **kwargs)
+        return f'{self.func.__name__}_tfm->{self.tfm_type.name}; {self.kw} (p={self.p})'
+
+    def resolve(self):
+        self.resolved = resolve_args(self.func, **self.kw)
+        self.do_run = rand_bool(self.p)
+
+    def __call__(self, x, *args, **kwargs):
+        return self.func(x, *args, **self.resolved, **kwargs) if self.do_run else x
 
 def reg_partial(cl, func):
     setattr(sys.modules[func.__module__], f'{func.__name__}_tfm', partial(cl,func))
@@ -145,7 +151,8 @@ def reg_partial(cl, func):
 
 def reg_transform(func): return reg_partial(Transform, func)
 
-def resolve_tfms(tfms): return [f() for f in listify(tfms)]
+def resolve_tfms(tfms):
+    for f in listify(tfms): f.resolve()
 
 @reg_transform
 def brightness(x, change: uniform) -> TfmType.Lighting:  return x.add_(scipy.special.logit(change))
@@ -169,11 +176,8 @@ def grid_sample_nearest(input, coords, padding_mode='zeros'):
     return result
 
 def grid_sample(x, coords, mode='bilinear', padding_mode='reflect'):
+    if padding_mode=='reflect': padding_mode='reflection'
     if mode=='nearest': return grid_sample_nearest(x[None], coords, padding_mode)[0]
-    if padding_mode=='reflect': # Reflect padding isn't implemented in grid_sample yet
-        coords[coords < -1] = coords[coords < -1].mul_(-1).add_(-2)
-        coords[coords > 1] = coords[coords > 1].mul_(-1).add_(2)
-        padding_mode='zeros'
     return F.grid_sample(x[None], coords, mode=mode, padding_mode=padding_mode)[0]
 
 def affine_grid(x, matrix, size=None):
@@ -181,56 +185,111 @@ def affine_grid(x, matrix, size=None):
     elif isinstance(size, int): size=(x.size(0), size, size)
     return F.affine_grid(matrix[None,:2], torch.Size((1,)+size))
 
-def apply_affine(m=None, func=None):
-    if m is None: m=torch.eye(3)
-    def _inner(img, size=None, **kwargs):
-        c = affine_grid(img,  img.new_tensor(m), size=size)
-        if func is not None: c = func(c)
-        return grid_sample(img, c, **kwargs)
-    return _inner
-
 def affines_mat(matrices=None):
-    if matrices is None: matrices=[]
+    if matrices is None or len(matrices) == 0: return None
     matrices = [FloatTensor(m) for m in matrices if m is not None]
     return reduce(torch.matmul, matrices, torch.eye(3))
 
+def affine_mult(c,m):
+    size = c.size()
+    c = c.view(-1,2)
+    c = torch.addmm(m[:2,2], c,  m[:2,:2].t())
+    return c.view(size)
+
+def _apply_affine(img, size=None, mats=None, func=None, **kwargs):
+    c = affine_grid(img, torch.eye(3), size=size)
+    if func is not None: c = func(c, img.size())
+    if mats:
+        m = affines_mat(mats)
+        c = affine_mult(c, img.new_tensor(m))
+    return grid_sample(img, c, **kwargs)
+
+def apply_affine(mats=None, func=None): return partial(_apply_affine, mats=mats, func=func)
+
 class AffineTransform(Transform):
-    def __call__(self): return super().__call__()()
+    def __call__(self, *args, **kwargs):
+        return self.func(*args, **self.resolved, **kwargs) if self.do_run else None
 
 def dict_groupby(iterable, key=None):
     return {k:list(v) for k,v in itertools.groupby(sorted(iterable, key=key), key=key)}
 
-def reg_affine(func): return reg_partial(AffineTransform, func)
+def _apply_tfm_funcs(pixel_func,lighting_func,affine_func,start_func, x,**kwargs):
+    if not np.any([pixel_func,lighting_func,affine_func,start_func]): return x
+    x = x.clone()
+    if start_func is not None:  x = start_func(x)
+    if affine_func is not None: x = affine_func(x, **kwargs)
+    if lighting_func is not None: x = lighting_func(x)
+    if pixel_func is not None: x = pixel_func(x)
+    return x
 
 def apply_tfms(tfms):
+    resolve_tfms(tfms)
     grouped_tfms = dict_groupby(listify(tfms), lambda o: o.tfm_type)
     start_tfms,affine_tfms,coord_tfms,pixel_tfms,lighting_tfms = [
-        resolve_tfms(grouped_tfms.get(o)) for o in TfmType]
+        (grouped_tfms.get(o)) for o in TfmType]
     lighting_func = apply_lighting(compose(lighting_tfms))
-    affine_func = apply_affine(affines_mat(affine_tfms), func=compose(coord_tfms))
-    start_func = compose(start_tfms)
-    pixel_func = compose(pixel_tfms)
-    return lambda x, **kwargs: pixel_func(lighting_func(affine_func(start_func(x.clone()), **kwargs)))
+    mats = [o() for o in listify(affine_tfms)]
+    affine_func = apply_affine(mats, func=compose(coord_tfms))
+    return partial(_apply_tfm_funcs,
+        compose(pixel_tfms),lighting_func,affine_func,compose(start_tfms))
+
+def reg_affine(func): return reg_partial(AffineTransform, func)
 
 @reg_affine
-def rotate(degrees: uniform) -> TfmType.Affine:
+def rotate(degrees:uniform) -> TfmType.Affine:
     angle = degrees * math.pi / 180
     return [[cos(angle), -sin(angle), 0.],
             [sin(angle),  cos(angle), 0.],
             [0.        ,  0.        , 1.]]
 
+def get_zoom_mat(sw, sh, c, r):
+    return [[sw, 0,  c],
+            [0, sh,  r],
+            [0,  0, 1.]]
+
 @reg_affine
-def zoom(scale: uniform = 1.0, row_pct:uniform = 0.5, col_pct:uniform = 0.5) -> TfmType.Affine:
+def zoom(scale:uniform=1.0, row_pct:uniform=0.5, col_pct:uniform=0.5) -> TfmType.Affine:
     s = 1-1/scale
     col_c = s * (2*col_pct - 1)
     row_c = s * (2*row_pct - 1)
-    return [[1/scale, 0,       col_c],
-            [0,       1/scale, row_c],
-            [0,       0,       1.    ]]
+    return get_zoom_mat(1/scale, 1/scale, col_c, row_c)
+
+@reg_affine
+def squish(scale:uniform=1.0, row_pct:uniform=0.5, col_pct:uniform=0.5) -> TfmType.Affine:
+    if scale <= 1:
+        col_c = (1-scale) * (2*col_pct - 1)
+        return get_zoom_mat(scale, 1, col_c, 0.)
+    else:
+        row_c = (1-1/scale) * (2*row_pct - 1)
+        return get_zoom_mat(1, 1/scale, 0., row_c)
 
 @reg_transform
-def jitter(x, magnitude: uniform) -> TfmType.Coord:
+def jitter(x, size, magnitude: uniform) -> TfmType.Coord:
     return x.add_((torch.rand_like(x)-0.5)*magnitude*2)
 
 @reg_transform
 def flip_lr(x) -> TfmType.Pixel: return x.flip(2)
+
+def compute_zs_mat(sz, scale, squish, invert, row_pct, col_pct):
+    orig_ratio = math.sqrt(sz[2]/sz[1])
+    for s,r, i in zip(scale,squish, invert):
+        s,r = math.sqrt(s),math.sqrt(r)
+        if s * r <= 1 and s / r <= 1: #Test if we are completely inside the picture
+            w,h = (s/r, s*r) if i else (s*r,s/r)
+            w /= orig_ratio
+            h *= orig_ratio
+            col_c = (1-w) * (2*col_pct - 1)
+            row_c = (1-h) * (2*row_pct - 1)
+            return get_zoom_mat(w, h, col_c, row_c)
+
+    #Fallback, hack to emulate a center crop without cropping anything yet.
+    if orig_ratio > 1: return get_zoom_mat(1/orig_ratio**2, 1, 0, 0.)
+    else:              return get_zoom_mat(1, orig_ratio**2, 0, 0.)
+
+@reg_transform
+def zoom_squish(c, sz, scale: uniform = 1.0, squish: uniform=1.0, invert: rand_bool = False,
+                row_pct:uniform = 0.5, col_pct:uniform = 0.5) -> TfmType.Coord:
+    #This is intended for scale, squish and invert to be of size 10 (or whatever) so that the transform
+    #can try a few zoom/squishes before falling back to center crop (like torchvision.RandomResizedCrop)
+    m = compute_zs_mat(sz, scale, squish, invert, row_pct, col_pct)
+    return affine_mult(c, FloatTensor(m))

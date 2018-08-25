@@ -5,23 +5,19 @@ First, thanks a lot for wanting to help!
 ## Did you find a bug?
 
 * Ensure the bug was not already reported by searching on GitHub under [Issues](https://github.com/fastai/fastai_v1/issues).
-
 * If you're unable to find an open issue addressing the problem, [open a new one](https://github.com/fastai/fastai_v1/issues/new). Be sure to include a title and clear description, as much relevant information as possible, and a code sample or an executable test case demonstrating the expected behavior that is not occurring.
-
 * Be sure to add the complete error messages.
 
 #### Did you write a patch that fixes a bug?
 
+* Sign the [Contributor License Agreement](https://www.clahub.com/agreements/fastai/fastai_v1).
 * Open a new GitHub pull request with the patch.
-
 * Ensure the PR description clearly describes the problem and solution. Include the relevant issue number if applicable.
-
 * Before submitting, please read the [doc on code style](https://github.com/fastai/fastai_v1/blob/master/docs/style.md) and [the one on abbreviations](https://github.com/fastai/fastai_v1/blob/master/docs/abbr.md) and clean-up your code accordingly.
 
 ## Do you intend to add a new feature or change an existing one?
 
 * You can suggest your change on the [fastai forum](http://forums.fast.ai/) to see if others are interested or want to help.
-
 * PRs are welcome with a complete description of the new feature and an example of how it's use. Be sure to document your code and read the [doc on code style](https://github.com/fastai/fastai_v1/blob/master/docs/style.md) and [the one on abbreviations](https://github.com/fastai/fastai_v1/blob/master/docs/abbr.md).
 
 ## Do you have questions about the source code?
@@ -32,9 +28,20 @@ First, thanks a lot for wanting to help!
 
 * Please read [Contributing to the documentation]() *link to be added*
 
+## Validate any notebooks you're contributing to
+
+* When you are done working on a notebook improvement, if you were using a text editor to make  changed, please, make sure to validate that notebook's format, by simply loading it in the jupyter notebook.
+
+Alternatively, you could use a CLI JSON validation tool, e.g. [jsonlint](https://jsonlint.com/):
+
+    jsonlint-php example.ipynb
+
+but it's second best, since you may have a valid JSON, but invalid notebook format, as the latter has extra requirements on which fields are valid and which are not.
+
+
 ## Git: a mandatory notebook strip out
 
-Currently we only store `source` code cells under git. If you would like to commit or submit a PR, you need to confirm to that standard.
+Currently we only store `source` code cells under git (and a few extra fields for documentation notebooks). If you would like to commit or submit a PR, you need to confirm to that standard.
 
 This is done automatically during `diff`/`commit` git operations, but you need to configure your local repository once to activate that instrumentation.
 

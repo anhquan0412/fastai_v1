@@ -61,7 +61,7 @@ from ipykernel.kernelapp import IPKernelApp
 def in_notebook(): return IPKernelApp.initialized()
 
 def to_device(device, b): return [o.to(device) for o in b]
-default_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+default_device = torch.device('cuda')
 
 if in_notebook():
     tqdm = tqdm_notebook
